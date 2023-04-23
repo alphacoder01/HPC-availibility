@@ -1,4 +1,5 @@
 # Usage:
+- `Requirements: python3, pandas`
 - `bash check_free_nodes.sh`
 - The following content will be printed:
     - for all nodes in HPC if resource available:
