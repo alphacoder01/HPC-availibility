@@ -24,7 +24,7 @@ if __name__ == '__main__':
                 print('\n')
 
     # AMD nodes info
-    print('AMD NODES:')
+    print('ScAI NODES:')
     node_name =[]
     owners = []
     sTime = []
@@ -33,7 +33,7 @@ if __name__ == '__main__':
     job_name = []
     for node in x['nodes'].keys():
         detail = x['nodes'][node]
-        if 'amd' in detail['Mom'] and (detail['state'] not  in ['down,offline','offline']):
+        if 'scai' in detail['Mom'] and (detail['state'] not  in ['down,offline','offline']):
             try:
                 jobs = detail['jobs']
             except:
