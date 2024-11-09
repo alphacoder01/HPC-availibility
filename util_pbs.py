@@ -2,128 +2,110 @@ import json
 import sys
 import os
 import pandas as pd
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import uuid
+
+def process_node(node, node_data, node_type):
+    detail = node_data['nodes'][node]
+    if node_type == 'amd' and 'scai' in detail['Mom']:
+        prefix = 'amd'
+    elif node_type == 'icelake' and 'aice' in detail['Mom']:
+        prefix = 'ice'
+    elif node_type == 'skylake' and 'vsky' in detail['Mom']:
+        prefix = 'sky'
+    else:
+        return None
+
+    if detail['state'] in ['down,offline', 'offline']:
+        return None
+
+    try:
+        jobs = detail['jobs']
+    except KeyError:
+        return None
+
+    results = []
+    for job in jobs:
+        # Generate a unique identifier for this file
+        unique_id = str(uuid.uuid4())
+        filename = f"{prefix}_{unique_id}.json"
+        
+        os.system(f"qstat -f {job} -F json >> {filename}")
+        try:
+            with open(filename, 'r') as f:
+                A = json.load(f)
+            
+            try:
+                gpu_count = A['Jobs'][job]['Resource_List']['ngpus']
+            except KeyError:
+                continue
+
+            results.append({
+                'Job ID': job,
+                'Node': detail['Mom'].split('.')[0],
+                'Owner': A['Jobs'][job]['Job_Owner'].split('@')[0],
+                'StartTime': A['Jobs'][job]['stime'],
+                'EndTime': A['Jobs'][job]['Resource_List']['walltime'],
+                'Resources (cpu, gpu)': (A['Jobs'][job]['Resource_List']['ncpus'], gpu_count)
+            })
+        except json.JSONDecodeError:
+            print(f"Error decoding JSON for job {job}")
+        finally:
+            # Always attempt to remove the file, even if an error occurred
+            try:
+                os.remove(filename)
+            except OSError:
+                print(f"Error removing file {filename}")
+    
+    return results
+
+# The rest of the script remains the same
+
+def process_node_type(node_type, data):
+    with Pool(cpu_count()) as pool:
+        results = pool.map(partial(process_node, node_data=data, node_type=node_type), data['nodes'].keys())
+    
+    results = [item for sublist in results if sublist is not None for item in sublist]
+    
+    df = pd.DataFrame(results)
+    df['endDate'] = pd.to_datetime(df['StartTime']) + pd.to_timedelta(df['EndTime'])
+    sorted_df = df.sort_values('endDate').drop_duplicates('Job ID').reset_index(drop=True)
+    
+    print(f'{node_type.upper()} NODES:')
+    print(sorted_df[:10])
+
+    U2G = {}
+    for _, row in sorted_df.iterrows():
+        _, G = row['Resources (cpu, gpu)']
+        usr = row['Owner']
+        if G > 0:
+            U2G[usr] = U2G.get(usr, 0) + G
+    print(U2G)
+
+    return sorted_df
+
+def print_available_resources(data):
+    for node, detail in data['nodes'].items():
+        if 'ngpus' in detail['resources_available'] and detail['state'] == 'free':
+            gpu_on_node = detail['resources_available']['ngpus']
+            gpu_alloted = detail['resources_assigned'].get('ngpus', 0)
+
+            if gpu_on_node - gpu_alloted > 0:
+                print("Node: ", detail['Mom'])
+                if detail['resources_assigned'] == {}:
+                    print("CPU available: ", detail['resources_available']['ncpus'])
+                else:
+                    print("CPU available: ", detail['resources_available']['ncpus'] - detail['resources_assigned']['ncpus'])
+                print("GPU available: ", gpu_on_node - gpu_alloted)
+                print('\n')
 
 if __name__ == '__main__':
     with open('./test_pbs.json', 'r') as f:
-        x = json.load(f)
+        data = json.load(f)
 
-    for node in x['nodes'].keys():
-        detail = x['nodes'][node]
-        if 'ngpus' in detail['resources_available'] and detail['state']=='free':
-            gpu_on_node = detail['resources_available']['ngpus']
-            try:
-                gpu_alloted = detail['resources_assigned']['ngpus']
-            except:
-                continue
+    print_available_resources(data)
 
-            if gpu_on_node - gpu_alloted > 0:
-                # print(detail)
-                print("Node: ",detail['Mom'])
-                print("CPU available: ",detail['resources_available']['ncpus'] - detail['resources_assigned']['ncpus'])
-                print("GPU available: ",detail['resources_available']['ngpus'] - detail['resources_assigned']['ngpus'])
-                print('\n')
-
-    # AMD nodes info
-    print('ScAI NODES:')
-    node_name =[]
-    owners = []
-    sTime = []
-    eTime = []
-    R = []
-    job_name = []
-    for node in x['nodes'].keys():
-        detail = x['nodes'][node]
-        if 'scai' in detail['Mom'] and (detail['state'] not  in ['down,offline','offline']):
-            try:
-                jobs = detail['jobs']
-            except:
-                continue
-            for job in jobs:
-                node_name.append(detail['Mom'].split('.')[0])
-                os.system(f"qstat -f {job} -F json >> amd.json")
-                with open('./amd.json', 'r') as f:
-                    A = json.load(f)
-                job_name.append(job)
-                owners.append(A['Jobs'][job]['Job_Owner'].split('@')[0])
-                sTime.append(A['Jobs'][job]['stime'])
-                eTime.append(A['Jobs'][job]['Resource_List']['walltime'])
-                R.append((A['Jobs'][job]['Resource_List']['ncpus'],A['Jobs'][job]['Resource_List']['ngpus']))
-                os.system("rm -rf ./amd.json")
-    
-    df = pd.DataFrame(list(zip(job_name,node_name,owners,sTime, eTime, R)), columns = ['Job ID','Node','Owner','StartTime','EndTime','Resources (cpu, gpu)'])
-    df['endDate'] = pd.to_datetime(df['StartTime'])+pd.to_timedelta(df['EndTime'])
-    sorted_df = df.sort_values('endDate')
-    sorted_df = sorted_df.drop_duplicates('Job ID')
-    sorted_df.reset_index(drop = True, inplace = True)
-    print(sorted_df[:10])
-
-    U2G = {}
-    for k in range(len(sorted_df)):
-        C,G = sorted_df['Resources (cpu, gpu)'].iloc[k]
-        usr = sorted_df['Owner'].iloc[k]
-        if G > 0:
-            if usr not in U2G:
-                U2G[usr]=1
-            else:
-                U2G[usr] +=1
-    print(U2G)
-            
-
-
-
-    #IceLake Nodes
-    print('Icelake NODES:')
-    node_name =[]
-    owners = []
-    sTime = []
-    eTime = []
-    R = []
-    job_name = []
-    for node in x['nodes'].keys():
-        detail = x['nodes'][node]
-        try:
-            if 'aice' in detail['Mom'] and (detail['state'] not  in ['down,offline','offline']):
-                jobs = detail['jobs']
-                for job in jobs:
-                    os.system(f"qstat -f {job} -F json >> ice.json")
-                    with open('./ice.json', 'r') as f:
-                        A = json.load(f)
-                    try:
-                        TT = (A['Jobs'][job]['Resource_List']['ngpus'])
-                    except:
-                        os.system("rm -rf ./ice.json")
-                        continue
-                    
-                    node_name.append(detail['Mom'].split('.')[0])
-                    job_name.append(job)
-                    owners.append(A['Jobs'][job]['Job_Owner'].split('@')[0])
-                    sTime.append(A['Jobs'][job]['stime'])
-                    eTime.append(A['Jobs'][job]['Resource_List']['walltime'])
-                    R.append((A['Jobs'][job]['Resource_List']['ncpus'],A['Jobs'][job]['Resource_List']['ngpus']))
-                    os.system("rm -rf ./ice.json")
-        except:
-            continue
-        
-    df = pd.DataFrame(list(zip(job_name,node_name,owners,sTime, eTime, R)), columns = ['Job ID','Node','Owner','StartTime','EndTime','Resources (cpu, gpu)'])
-    df['endDate'] = pd.to_datetime(df['StartTime'])+pd.to_timedelta(df['EndTime'])
-    sorted_df = df.sort_values('endDate')
-    sorted_df = sorted_df.drop_duplicates('Job ID')
-    sorted_df.reset_index(drop = True, inplace = True)
-    print(sorted_df[:10])
-
-
-    U2G = {}
-    for k in range(len(sorted_df)):
-        C,G = sorted_df['Resources (cpu, gpu)'].iloc[k]
-        usr = sorted_df['Owner'].iloc[k]
-        if G > 0:
-            if usr not in U2G:
-                U2G[usr]=1
-            else:
-                U2G[usr] +=1
-    print(U2G)
-
-
-
-
-                
+    node_types = ['amd', 'icelake', 'skylake']
+    for node_type in node_types:
+        process_node_type(node_type, data)
